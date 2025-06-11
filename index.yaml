@@ -11,4 +11,16 @@ entries:
     urls:
     - https://github.com/buall/charts/releases/download/demo-0.1.0/demo-0.1.0.tgz
     version: 0.1.0
-generated: "2025-06-11T08:05:37.066067425Z"
+  nifi:
+  - apiVersion: v2
+    appVersion: 2.3.0
+    created: "2025-06-11T14:17:11.807208535Z"
+    description: An easy to use, powerful, and reliable system to process and distribute
+      data.
+    digest: fd46d6955a3cc3cdf86938829e0b9f49dc1cd41883d305a79c58aa266df47302
+    name: nifi
+    type: application
+    urls:
+    - https://github.com/buall/charts/releases/download/nifi-1.0.0/nifi-1.0.0.tgz
+    version: 1.0.0
+generated: "2025-06-11T14:17:11.807219957Z"
