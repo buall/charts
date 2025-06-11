@@ -1,0 +1,13 @@
+1. Get the NIFI Web URL by running these commands:
+{{- if .Values.ingress.enabled }}
+{{- range $host := .Values.ingress.hosts }}
+  echo "Visit http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host }}/nifi to NIFI Web."
+{{- end }}
+{{- else if contains "NodePort" .Values.service.type }}
+  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "nifi.fullname" . }})
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo "Visit https://$NODE_IP:$NODE_PORT/nifi to NIFI Web."
+{{- else if contains "ClusterIP" .Values.service.type }}
+  kubectl --namespace {{ .Release.Namespace }} port-forward service/{{ template "nifi.fullname" . }} 8443:8443 --address 0.0.0.0
+  echo "Visit https://localhost:8443/nifi to NIFI Web."
+{{- end }}

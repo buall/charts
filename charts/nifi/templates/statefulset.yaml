@@ -1,0 +1,458 @@
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ template "nifi.fullname" . }}
+  labels:
+    app: {{ include "nifi.name" . | quote }}
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}"
+    release: {{ .Release.Name | quote }}
+    heritage: {{ .Release.Service | quote }}
+spec:
+  podManagementPolicy: {{ .Values.sts.podManagementPolicy }}
+  serviceName: {{ template "nifi.fullname" . }}-headless
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ template "nifi.name" . }}
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      annotations:
+{{- if .Values.sts.pod.annotations }}
+{{ toYaml .Values.sts.pod.annotations | indent 8 }}
+{{- else }}
+        security.alpha.kubernetes.io/sysctls: net.ipv4.ip_local_port_range=10000 65000
+{{- end }}
+      labels:
+        app: {{ include "nifi.name" . | quote }}
+        chart: "{{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}"
+        release: {{ .Release.Name | quote }}
+        heritage: {{ .Release.Service | quote }}
+{{- if .Values.extraLabels }}
+{{ toYaml .Values.extraLabels | indent 8 }}
+{{- end }}
+    spec:
+{{- if .Values.sts.useHostNetwork }}
+      hostNetwork: {{ .Values.sts.useHostNetwork }}
+      dnsPolicy: ClusterFirstWithHostNet
+{{- end }}
+{{- if .Values.sts.hostAliases }}
+      hostAliases:
+{{ toYaml .Values.sts.hostAliases | indent 8 }}
+{{- end }}
+      serviceAccountName: {{ include "nifi.serviceAccountName" . }}
+      {{- if eq .Values.sts.AntiAffinity "hard" }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: "app"
+                    operator: In
+                    values:
+                    - {{ include "nifi.name" . | quote }}
+              topologyKey: "kubernetes.io/hostname"
+      {{- else if eq .Values.sts.AntiAffinity "soft" }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+             - weight: 1
+               podAffinityTerm:
+                 labelSelector:
+                    matchExpressions:
+                      - key: "app"
+                        operator: In
+                        values:
+                         - {{ include "nifi.name" . | quote }}
+                 topologyKey: "kubernetes.io/hostname"
+      {{- end }}
+{{- if and .Values.affinity (and (ne .Values.sts.AntiAffinity "hard") (ne .Values.sts.AntiAffinity "soft")) }}
+      affinity:
+{{ toYaml .Values.affinity | indent 8 }}
+{{- end }}
+{{- if .Values.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+{{- end }}
+{{- if .Values.tolerations }}
+      tolerations:
+{{ toYaml .Values.tolerations | indent 8 }}
+{{- end }}
+{{- if .Values.nodeSelector }}
+      nodeSelector:
+{{ toYaml .Values.nodeSelector | indent 8 }}
+{{- end }}
+{{- if .Values.securityContext }}
+      securityContext:
+{{ toYaml .Values.securityContext | indent 8 }}
+{{- end }}
+      initContainers:
+{{- if .Values.properties.isNode }}
+      - name: zookeeper
+        imagePullPolicy: {{ .Values.sidecar.imagePullPolicy | default "Always" | quote }}
+        image: "{{ .Values.sidecar.image }}:{{ .Values.sidecar.tag }}"
+        command:
+        - sh
+        - -c
+        - |
+          echo trying to contact {{ template "zookeeper.server" . }} {{ .Values.zookeeper.port }}
+          until nc -vzw 1 {{ template "zookeeper.server" . }} {{ .Values.zookeeper.port }}; do
+            echo "waiting for zookeeper..."
+            sleep 2
+          done
+{{- end }}
+{{- range $key, $value := .Values.initContainers }}
+      - name: {{ $key }}
+{{ toYaml $value | indent 8 }}
+{{- end }}
+      {{- if .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecret }}
+      {{- end }}
+      containers:
+{{- if .Values.extraContainers }}
+{{- toYaml .Values.extraContainers | nindent 6 }}
+{{- end }}
+      - name: server
+        imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        command:
+        - bash
+        - -ce
+        - |
+          prop_replace () {
+            target_file=${NIFI_HOME}/conf/${3:-nifi.properties}
+            echo "updating ${1} in ${target_file}"
+            if egrep "^${1}=" ${target_file} &> /dev/null; then
+              sed -i -e "s|^$1=.*$|$1=$2|"  ${target_file}
+            else
+              echo ${1}=${2} >> ${target_file}
+            fi
+          }
+          mkdir -p ${NIFI_HOME}/config-data/conf
+
+          cat "${NIFI_HOME}/conf/nifi.temp" > "${NIFI_HOME}/conf/nifi.properties"
+
+          bin/nifi.sh set-single-user-credentials {{ .Values.auth.singleUser.username }} {{ .Values.auth.singleUser.password }}
+
+{{- if .Values.sts.useHostNetwork }}
+          FQDN="0.0.0.0"
+{{- else }}
+          FQDN=$(hostname -f)
+{{- end }}
+
+          prop_replace nifi.ui.banner.text $(hostname -s)
+          prop_replace nifi.remote.input.host ${FQDN}
+          prop_replace nifi.cluster.node.address ${FQDN}
+          prop_replace nifi.zookeeper.connect.string ${NIFI_ZOOKEEPER_CONNECT_STRING}
+          prop_replace nifi.web.http.host ${FQDN}
+
+          prop_replace nifi.web.https.host "$(hostname).{{ template "nifi.fullname" $ }}-headless.{{ $.Release.Namespace }}.svc.{{ $.Values.certManager.clusterDomain }}"
+          prop_replace nifi.cluster.node.address "$(hostname).{{ template "nifi.fullname" $ }}-headless.{{ $.Release.Namespace }}.svc.{{ $.Values.certManager.clusterDomain }}"
+          prop_replace nifi.web.https.network.interface.default eth0
+          prop_replace nifi.web.https.network.interface.lo lo
+          prop_replace nifi.web.http.host ""
+          prop_replace nifi.web.http.port ""
+
+{{- if .Values.properties.webProxyHost }}
+          # Update nifi.properties for web ui proxy hostname
+          prop_replace nifi.web.proxy.host localhost,{{ template "nifi.fullname" $ }}.{{ .Release.Namespace }}.svc,{{ .Values.properties.webProxyHost }}
+{{- else }}
+          prop_replace nifi.web.proxy.host localhost,{{ template "nifi.fullname" $ }}.{{ .Release.Namespace }}.svc
+{{- end }}
+
+          prop_replace nifi.security.keyPasswd ''
+          prop_replace nifi.security.keystorePasswd ''
+          prop_replace nifi.security.truststorePasswd ''
+          rm -f "${NIFI_HOME}/conf/keystore.p12" "${NIFI_HOME}/conf/truststore.p12"
+
+          prop_replace nifi.sensitive.props.key {{ .Values.properties.sensitiveKey | quote }}
+
+          echo "---------------------------------"
+          cat "${NIFI_HOME}/conf/nifi.properties"
+          echo "---------------------------------"
+
+          exec bin/nifi.sh run & nifi_pid="$!"
+          echo NiFi running with PID ${nifi_pid}.
+          wait ${nifi_pid}
+
+        resources:
+{{ toYaml .Values.resources | indent 10 }}
+        ports:
+{{- if .Values.metrics.prometheus.enabled }}
+        - containerPort: {{ .Values.metrics.prometheus.port }}
+          name: metrics
+          protocol: TCP                  
+{{- end }}
+        - containerPort: {{ .Values.properties.httpsPort }}
+{{- if .Values.sts.hostPort }}
+          hostPort: {{ .Values.sts.hostPort }}
+{{- end }}
+          name: https
+          protocol: TCP
+        - containerPort: {{ .Values.properties.clusterPort }}
+          name: cluster
+          protocol: TCP
+{{- if .Values.containerPorts  }}
+{{ toYaml .Values.containerPorts | indent 8 }}
+{{- end }}
+        env:
+        - name: NIFI_ZOOKEEPER_CONNECT_STRING
+          value: {{ template "zookeeper.url" . }}
+{{- if not (or (.Values.auth.ldap.enabled) (.Values.auth.oidc.enabled)) }}
+        - name: NIFI_WEB_HTTPS_HOST
+          value: 0.0.0.0
+{{- end }}
+{{- if .Values.env }}
+{{ toYaml .Values.env | indent 8 }}
+{{- end }}
+{{- if .Values.envFrom }}
+        envFrom:
+{{ toYaml .Values.envFrom | indent 8 }}
+{{- end }}
+{{- if .Values.postStart }}
+        lifecycle:
+          postStart:
+            exec:
+              command: ["/bin/sh", "-c", {{ .Values.postStart | quote }}]
+{{- end }}
+{{- if .Values.properties.isNode }}
+        readinessProbe:
+{{- if not .Values.sts.startupProbe.enabled  }}
+          initialDelaySeconds: 60
+{{- end }}
+          periodSeconds: 20
+          tcpSocket:
+            port: {{ .Values.properties.httpsPort }}
+{{- end }}
+{{- if .Values.sts.startupProbe.enabled }}
+        startupProbe:
+          failureThreshold: {{ .Values.sts.startupProbe.failureThreshold }}
+          periodSeconds: {{ .Values.sts.startupProbe.periodSeconds }}
+          tcpSocket:
+            port: {{ .Values.properties.httpsPort }}
+{{- end }}
+        livenessProbe:
+{{- if not .Values.sts.startupProbe.enabled }}
+          initialDelaySeconds: 90
+{{- end }}
+          periodSeconds: 60
+          tcpSocket:
+            port: {{ .Values.properties.httpsPort }}
+        volumeMounts:
+          - mountPath: /opt/nifi/nifi-current/logs
+            {{- if and .Values.persistence.enabled .Values.persistence.subPath.enabled }}
+            name: {{ .Values.persistence.subPath.name }}
+            subPath: logs
+            {{- else }}
+            name: "logs"
+            {{- end }}
+          - mountPath: /opt/nifi/data
+            {{- if and .Values.persistence.enabled .Values.persistence.subPath.enabled }}
+            name: {{ .Values.persistence.subPath.name }}
+            subPath: data
+            {{- else }}
+            name: "data"
+            {{- end }}
+          - mountPath: /opt/nifi/nifi-current/flowfile_repository
+            {{- if and .Values.persistence.enabled .Values.persistence.subPath.enabled }}
+            name: {{ .Values.persistence.subPath.name }}
+            subPath: flowfile-repository
+            {{- else }}
+            name: "flowfile-repository"
+            {{- end }}
+          - mountPath: /opt/nifi/nifi-current/content_repository
+            {{- if and .Values.persistence.enabled .Values.persistence.subPath.enabled }}
+            name: {{ .Values.persistence.subPath.name }}
+            subPath: content-repository
+            {{- else }}
+            name: "content-repository"
+            {{- end }}
+          - mountPath: /opt/nifi/nifi-current/provenance_repository
+            {{- if and .Values.persistence.enabled .Values.persistence.subPath.enabled }}
+            name: {{ .Values.persistence.subPath.name }}
+            subPath: provenance-repository
+            {{- else }}
+            name: "provenance-repository"
+            {{- end }}
+          - mountPath: /opt/nifi/nifi-current/state
+            {{- if and .Values.persistence.enabled .Values.persistence.subPath.enabled }}
+            name: {{ .Values.persistence.subPath.name }}
+            subPath: state
+            {{- else }}
+            name: "state"
+            {{- end }}
+          - name: "nifi-properties"
+            mountPath: /opt/nifi/nifi-current/conf/nifi.temp
+            subPath: "nifi.temp"
+          {{- if .Values.extraVolumeMounts }}
+{{ toYaml .Values.extraVolumeMounts | indent 10 }}
+          {{- end }}
+      - name: app-log
+        imagePullPolicy: {{ .Values.sidecar.imagePullPolicy | default "Always" | quote }}
+        image: "{{ .Values.sidecar.image }}:{{ .Values.sidecar.tag }}"
+        args: 
+          - /bin/sh
+          - -c
+          - trap "exit 0" TERM; tail -n+1 -F /var/log/nifi-app.log & wait $!
+        resources:
+{{ toYaml .Values.logresources | indent 10 }}
+        volumeMounts:
+        - mountPath: /var/log
+          {{- if and .Values.persistence.enabled .Values.persistence.subPath.enabled }}
+          name: {{ .Values.persistence.subPath.name }}
+          subPath: logs
+          {{- else }}
+          name: "logs"
+          {{- end }}
+      - name: bootstrap-log
+        imagePullPolicy: {{ .Values.sidecar.imagePullPolicy | default "Always" | quote }}
+        image: "{{ .Values.sidecar.image }}:{{ .Values.sidecar.tag }}"
+        args:
+          - /bin/sh
+          - -c
+          - trap "exit 0" TERM; tail -n+1 -F /var/log/nifi-bootstrap.log & wait $!
+        resources:
+{{ toYaml .Values.logresources | indent 10 }}
+        volumeMounts:
+        - mountPath: /var/log
+          {{- if and .Values.persistence.enabled .Values.persistence.subPath.enabled }}
+          name: {{ .Values.persistence.subPath.name }}
+          subPath: logs
+          {{- else }}
+          name: "logs"
+          {{- end }}
+      - name: user-log
+        imagePullPolicy: {{ .Values.sidecar.imagePullPolicy | default "Always" | quote }}
+        image: "{{ .Values.sidecar.image }}:{{ .Values.sidecar.tag }}"
+        args:
+          - /bin/sh
+          - -c
+          - trap "exit 0" TERM; tail -n+1 -F /var/log/nifi-user.log & wait $!
+        resources:
+{{ toYaml .Values.logresources | indent 10 }}
+        volumeMounts:
+        - mountPath: /var/log
+          {{- if and .Values.persistence.enabled .Values.persistence.subPath.enabled }}
+          name: {{ .Values.persistence.subPath.name }}
+          subPath: logs
+          {{- else }}
+          name: "logs"
+          {{- end }}
+      volumes:
+      - name: "nifi-properties"
+        configMap:
+          name: {{ template "nifi.fullname" . }}-config
+          items:
+            - key: "nifi.properties"
+              path: "nifi.temp"
+      {{- range .Values.secrets }}
+      - name: {{ include "nifi.fullname" $ }}-{{ .name }}
+        secret:
+          secretName: {{ .name }}
+      {{- end }}
+      {{- range .Values.configmaps }}
+      - name: {{ include "nifi.fullname" $ }}-{{ .name }}
+        configMap:
+          name: {{ .name }}
+      {{- end }}
+{{- if not .Values.persistence.enabled }}
+      - name: data
+        emptyDir: {}
+      - name: flowfile-repository
+        emptyDir: {}
+      - name: content-repository
+        emptyDir: {}
+      - name: provenance-repository
+        emptyDir: {}
+      - name: logs
+        emptyDir: {}
+      - name: state
+        emptyDir: { }
+{{- end }}
+{{- if .Values.extraVolumes }}
+{{ toYaml .Values.extraVolumes | indent 6 }}
+{{- end }}
+{{- if and .Values.persistence.enabled .Values.persistence.subPath.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: {{ .Values.persistence.subPath.name }}
+      spec:
+        accessModes:
+        {{- range .Values.persistence.accessModes }}
+          - {{ . | quote }}
+        {{- end }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.subPath.size }}
+{{- end }}
+{{- if and .Values.persistence.enabled (not .Values.persistence.subPath.enabled) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: logs
+      spec:
+        accessModes:
+        {{- range .Values.persistence.accessModes }}
+          - {{ . | quote }}
+        {{- end }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.logStorage.size }}
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+        {{- range .Values.persistence.accessModes }}
+          - {{ . | quote }}
+        {{- end }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.dataStorage.size }}
+    - metadata:
+        name: flowfile-repository
+      spec:
+        accessModes:
+        {{- range .Values.persistence.accessModes }}
+          - {{ . | quote }}
+        {{- end }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.flowfileRepoStorage.size }}
+    - metadata:
+        name: content-repository
+      spec:
+        accessModes:
+        {{- range .Values.persistence.accessModes }}
+          - {{ . | quote }}
+        {{- end }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.contentRepoStorage.size }}
+    - metadata:
+        name: provenance-repository
+      spec:
+        accessModes:
+        {{- range .Values.persistence.accessModes }}
+          - {{ . | quote }}
+        {{- end }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.provenanceRepoStorage.size }}
+    - metadata:
+        name: state
+      spec:
+        accessModes:
+        {{- range .Values.persistence.accessModes }}
+          - {{ . | quote }}
+        {{- end }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.state.size }}
+{{- end }}
