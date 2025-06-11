@@ -1,0 +1,14 @@
+apiVersion: v1
+entries:
+  demo:
+  - apiVersion: v2
+    appVersion: 1.16.0
+    created: "2025-06-11T08:05:37.066052878Z"
+    description: A Helm chart for Kubernetes
+    digest: 1ec81cc0bc964b7969a944551e852e1054d16f47d2b5eba0c0c90bc78dcbf59c
+    name: demo
+    type: application
+    urls:
+    - https://github.com/buall/charts/releases/download/demo-0.1.0/demo-0.1.0.tgz
+    version: 0.1.0
+generated: "2025-06-11T08:05:37.066067425Z"
